@@ -7,8 +7,8 @@
 // sell-off of 150+ bps off the trailing 4-hour high, followed by a small
 // upward turn in the last 5 minutes. Buy that confirmed bounce with the whole
 // stack, then let it run to +180 bps or trail it 80 bps off its peak, with a
-// hard -120 bps stop. One clean round trip on the dev window: in near 63856,
-// out near 64848, about +$11.8 after fees.
+// hard -120 bps stop and a 30-bar cooldown after any exit, so a stop-out never
+// buys straight back into the same falling knife. One clean round trip on the
 //
 // Protocol: agent-fun/bars-replay/v1 via the vendored shim. Orders decided on
 // bar k fill at bar k+1's open, so every signal is read off closes we have
@@ -33,6 +33,8 @@ const TAKE_PROFIT_BPS = 180n;
 const TRAIL_BPS = 80n;
 // Hard stop below the entry close (bps).
 const STOP_BPS = 120n;
+// Bars to wait after an exit before a new entry is allowed.
+const COOLDOWN_BARS = 30;
 // Max slippage vs the latest close we tolerate on a fill. The modelled cost
 // is ~2 bps slip + ~10 bps impact on a full-size order, so 300 bps leaves
 // ample room for a one-minute gap without ever binding in normal bars.
@@ -47,10 +49,13 @@ interface TradeState {
   closes: bigint[];
   entryClose: bigint | null;
   peakClose: bigint | null;
+  // Bars since the last exit; a fresh entry needs the dip to re-form after
+  // a stop-out instead of buying straight back into the same falling knife.
+  barsSinceExit: number;
 }
 
 function freshState(): TradeState {
-  return { closes: [], entryClose: null, peakClose: null };
+  return { closes: [], entryClose: null, peakClose: null, barsSinceExit: COOLDOWN_BARS };
 }
 
 const trade: TradeState = freshState();
@@ -77,13 +82,16 @@ function onBatch(state: BarsState, _batch: Batch): OrderInput[] {
     if (exit) {
       trade.entryClose = null;
       trade.peakClose = null;
+      trade.barsSinceExit = 0;
       return [{ side: 'sell', symbol: SYMBOL, qty, max_slippage_bps: MAX_SLIP_BPS }];
     }
     return [];
   }
+  trade.barsSinceExit++;
 
   // Flat: look for a confirmed deep dip.
   if (trade.closes.length < LOOKBACK) return [];
+  if (trade.barsSinceExit < COOLDOWN_BARS) return [];
   let high = trade.closes[0]!;
   for (const c of trade.closes) if (c > high) high = c;
   const dip = bpsDiff(close, high); // negative when below the high
